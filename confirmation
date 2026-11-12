@@ -1,0 +1,61 @@
+# Confirm 01-package-install.sh
+docker run --rm custom-ubuntu:latest \
+    dpkg-query -W curl wget git vim-tiny htop sudo openssh-server
+
+
+# Confirm 02-package-removal.sh
+docker run --rm custom-ubuntu:latest \
+    dpkg-query -W nano
+
+# Confirm 03-system-configuration.sh
+docker run --rm custom-ubuntu:latest bash -c '
+    echo "Hostname:"
+    cat /etc/hostname
+
+    echo
+    echo "Timezone:"
+    cat /etc/timezone
+
+    echo
+    echo "Login message:"
+    cat /etc/motd
+
+    echo
+    echo "Sysctl configuration:"
+    cat /etc/sysctl.d/99-custom.conf
+'
+
+# Confirm 04-user-congiguration.sh
+docker run --rm custom-ubuntu:latest bash -c '
+    id isoadmin
+    echo
+    getent passwd isoadmin
+    echo
+    ls -ld /home/isoadmin/custom
+'
+
+# Confirm 05-service-configuration.sh
+docker run --rm custom-ubuntu:latest bash -c '
+    cat /etc/ssh/sshd_config.d/99-custom.conf
+    echo
+    systemctl --root=/ is-enabled ssh.service
+'
+
+# Confirm 06-custom-application.sh
+docker run --rm custom-ubuntu:latest hello-custom
+
+
+# build the custom iso
+docker buildx build \
+    --target iso-artifact \
+    --build-arg RUN_CUSTOMIZATION=true \
+    --output type=local,dest=./iso-output \
+    .
+
+# build the custom ubuntu image
+docker buildx build \
+    --target ubuntu-image \
+    --build-arg RUN_CUSTOMIZATION=true \
+    --tag custom-ubuntu:latest \
+    --load \
+    .
