@@ -3,6 +3,7 @@
 
 set -Eeuo pipefail
 
+run_network_diagnostics() {
 echo "=================================="
 echo " NETWORK DIAGNOSTICS"
 echo "=================================="
@@ -34,8 +35,9 @@ echo
 echo "=================================="
 echo " END NETWORK DIAGNOSTICS"
 echo "=================================="
+}
 
-
+update_package_indexes() {
 echo "Starting APT repository update..."
 
 echo "Configured APT repositories:"
@@ -54,7 +56,9 @@ if ! timeout --signal=TERM 300s apt-get \
 fi
 
 echo "APT repository update finished."
+}
 
+install_packages_with_services_disabled() {
 echo "Installing packages..."
 
 policy_rc_d=/usr/sbin/policy-rc.d
@@ -114,3 +118,8 @@ restore_policy_rc_d
 trap - EXIT
 
 echo "Package installation completed."
+}
+
+run_network_diagnostics
+update_package_indexes
+install_packages_with_services_disabled
