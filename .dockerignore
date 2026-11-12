@@ -1,0 +1,6 @@
+.git
+.git/**
+iso-output
+iso-output/**
+*.log
+*.tmp

@@ -23,6 +23,9 @@ ARG RUN_CUSTOMIZATION=true
 # Original Ubuntu ISO checksum.
 ARG UBUNTU_ISO_SHA256=97f3d7ffb032c3eb3b23d2c8be9cc76e60c2c1f2c0146ba5ba9fe01cafae0fd8
 
+# Compression used for the rebuilt live filesystem.
+ARG SQUASHFS_COMPRESSION=xz
+
 # Original GRUB configuration location inside the ISO.
 ARG GRUB_CFG_PATH=/boot/grub/grub.cfg
 
@@ -30,7 +33,8 @@ ARG GRUB_CFG_PATH=/boot/grub/grub.cfg
 # INSTALL BUILD DEPENDENCIES
 # ------------------------------------------------------------
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         xorriso \
@@ -51,18 +55,9 @@ WORKDIR /work
 # Original Ubuntu ISO.
 COPY ubuntu-24.04.5-live-server-amd64.iso /work/original.iso
 
-# Customization scripts.
-COPY scripts/ /work/scripts/
-
-# Custom GRUB files.
-COPY grub-overlay/ /work/grub-overlay/
-
-# ============================================================
-# MAIN BUILD PROCESS
-# ============================================================
-
+# Verify and extract the source ISO in a cached layer that does not depend on
+# the customization scripts or GRUB overlay.
 RUN set -euo pipefail; \
-
     echo "=================================="; \
     echo " VERIFYING ORIGINAL UBUNTU ISO"; \
     echo "=================================="; \
@@ -86,8 +81,18 @@ RUN set -euo pipefail; \
     \
     unsquashfs -f \
         -d /work/rootfs \
-        /work/filesystem.squashfs; \
-    \
+        /work/filesystem.squashfs
+
+# Copy customization inputs after extraction so edits reuse the cached rootfs.
+COPY scripts/ /work/scripts/
+COPY grub-overlay/ /work/grub-overlay/
+
+# ============================================================
+# MAIN BUILD PROCESS
+# ============================================================
+
+RUN set -euo pipefail; \
+
     # --------------------------------------------------------
     # COPY CUSTOMIZATION SCRIPTS INTO ROOTFS
     # --------------------------------------------------------
@@ -103,14 +108,29 @@ RUN set -euo pipefail; \
     \
     if [[ "$RUN_CUSTOMIZATION" == "true" ]]; then \
         echo "Running Ubuntu customization..."; \
-        echo "Builder DNS configuration:" \
-        cat /etc/resolv.conf \
-        echo "Checking rootfs resolver:" \
-        ls -l /work/rootfs/etc/resolv.conf || true \
+        echo "Builder DNS configuration:"; \
+        cat /etc/resolv.conf; \
+        echo "Checking rootfs resolver:"; \
+        ls -l /work/rootfs/etc/resolv.conf || true; \
+        resolver_link=""; \
+        resolver_file_backup=""; \
+        if [[ -L /work/rootfs/etc/resolv.conf ]]; then \
+            resolver_link="$(readlink /work/rootfs/etc/resolv.conf)"; \
+        elif [[ -e /work/rootfs/etc/resolv.conf ]]; then \
+            resolver_file_backup=/work/rootfs-resolv.conf.original; \
+            cp -a /work/rootfs/etc/resolv.conf "$resolver_file_backup"; \
+        fi; \
+        rm -f /work/rootfs/etc/resolv.conf; \
+        cp /etc/resolv.conf /work/rootfs/etc/resolv.conf; \
         proot -R /work/rootfs \
-            -b /etc/resolv.conf:/etc/resolv.conf \
             /usr/bin/env DEBIAN_FRONTEND=noninteractive \
             /bin/bash /opt/iso-customize/customize.sh; \
+        rm /work/rootfs/etc/resolv.conf; \
+        if [[ -n "$resolver_link" ]]; then \
+            ln -s "$resolver_link" /work/rootfs/etc/resolv.conf; \
+        elif [[ -n "$resolver_file_backup" ]]; then \
+            mv "$resolver_file_backup" /work/rootfs/etc/resolv.conf; \
+        fi; \
     elif [[ "$RUN_CUSTOMIZATION" != "false" ]]; then \
         echo "RUN_CUSTOMIZATION must be true or false." >&2; \
         exit 1; \
@@ -128,17 +148,7 @@ RUN set -euo pipefail; \
     mksquashfs /work/rootfs \
         /work/filesystem-custom.squashfs \
         -noappend \
-        -comp xz; \
-    \
-    # --------------------------------------------------------
-    # CREATE DOCKER ROOTFS ARCHIVE
-    # --------------------------------------------------------
-    \
-    echo "Creating Docker root filesystem archive..."; \
-    \
-    tar --numeric-owner \
-        -cpf /work/rootfs.tar \
-        -C /work/rootfs .; \
+        -comp "$SQUASHFS_COMPRESSION"; \
     \
     # ========================================================
     # GRUB CUSTOMIZATION
@@ -174,6 +184,9 @@ RUN set -euo pipefail; \
         -outdev /work/custom.iso \
     ); \
     \
+    # Replay boot metadata before changing files in the ISO tree.
+    xorriso_args+=( -boot_image any replay ); \
+    \
     # Replace original SquashFS with customized SquashFS.
     xorriso_args+=( \
         -map \
@@ -203,6 +216,10 @@ RUN set -euo pipefail; \
         \
         # Convert local path to ISO path.
         iso_path="/${overlay_file#/work/grub-overlay/}"; \
+        if [[ "$iso_path" == *'..'* || "$iso_path" == *'\\'* ]]; then \
+            echo "Invalid overlay destination: $iso_path" >&2; \
+            exit 1; \
+        fi; \
         \
         # Do not overwrite the patched main GRUB configuration.
         if [[ "$iso_path" == "$GRUB_CFG_PATH" ]]; then \
@@ -223,7 +240,6 @@ RUN set -euo pipefail; \
     # --------------------------------------------------------
     \
     xorriso_args+=( \
-        -boot_image any replay \
         -commit \
         -end \
     ); \
@@ -236,6 +252,11 @@ RUN set -euo pipefail; \
     \
     "${xorriso_args[@]}"; \
     \
+    # Confirm the ISO is readable and contains the rebuilt filesystem and GRUB files.
+    test -s /work/custom.iso; \
+    xorriso -indev /work/custom.iso -find "$CASPER_SQUASHFS_PATH" -exec lsdl; \
+    xorriso -indev /work/custom.iso -find "$GRUB_CFG_PATH" -exec lsdl; \
+    \
     # --------------------------------------------------------
     # EXPORT ISO TO OUTPUT DIRECTORY
     # --------------------------------------------------------
@@ -246,20 +267,22 @@ RUN set -euo pipefail; \
     echo "ISO build completed."
 
 
-    # Prepare Docker root filesystem.
-    RUN mkdir -p /work/docker-rootfs && \
-        tar --numeric-owner \
-            --exclude='./proc' \
-            --exclude='./sys' \
-            --exclude='./dev' \
-            --exclude='./run' \
-            --exclude='./tmp' \
-            --exclude='./etc/hosts' \
-            --exclude='./etc/resolv.conf' \
-            --exclude='./etc/hostname' \
-            --exclude='./etc/mtab' \
-            -cpf - -C /work/rootfs . \
-            | tar -xpf - -C /work/docker-rootfs
+# Prepare a container-friendly root filesystem after creating the ISO.
+RUN mkdir -p /work/docker-rootfs && \
+    tar --numeric-owner \
+        --exclude='./proc' \
+        --exclude='./sys' \
+        --exclude='./dev' \
+        --exclude='./run' \
+        --exclude='./tmp' \
+        --exclude='./etc/hosts' \
+        --exclude='./etc/resolv.conf' \
+        --exclude='./etc/hostname' \
+        --exclude='./etc/mtab' \
+        -cpf - -C /work/rootfs . \
+        | tar -xpf - -C /work/docker-rootfs && \
+    mkdir -p /work/docker-rootfs/{dev,proc,sys,run,tmp} && \
+    chmod 1777 /work/docker-rootfs/tmp
 
 # ============================================================
 # STAGE 2: ISO ARTIFACT
