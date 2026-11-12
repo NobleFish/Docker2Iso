@@ -3,9 +3,10 @@
 
 set -Eeuo pipefail
 
-# Print every command before executing it.
-export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
-set -x
+if [[ "${DEBUG_CUSTOMIZATION:-false}" == true ]]; then
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    set -x
+fi
 
 echo "=================================="
 echo " NETWORK DIAGNOSTICS"
@@ -19,7 +20,7 @@ echo "Checking Ubuntu repository DNS:"
 if getent hosts archive.ubuntu.com; then
     echo "DNS resolution successful."
 else
-    echo "ERROR: DNS resolution failed."
+    echo "ERROR: Diagnostic hostname resolution failed; APT will report whether its configured mirrors are reachable." >&2
 fi
 
 echo
@@ -58,7 +59,8 @@ echo "APT repository update finished."
 echo "Installing packages..."
 
 policy_rc_d=/usr/sbin/policy-rc.d
-policy_rc_d_backup="$(mktemp /tmp/policy-rc.d.XXXXXX)"
+policy_rc_d_backup_dir="$(mktemp -d /tmp/policy-rc.d.XXXXXX)"
+policy_rc_d_backup="$policy_rc_d_backup_dir/policy-rc.d"
 policy_rc_d_existed=false
 
 if [[ -e "$policy_rc_d" || -L "$policy_rc_d" ]]; then
@@ -70,9 +72,8 @@ restore_policy_rc_d() {
     rm -f "$policy_rc_d"
     if [[ "$policy_rc_d_existed" == true ]]; then
         mv "$policy_rc_d_backup" "$policy_rc_d"
-    else
-        rm -f "$policy_rc_d_backup"
     fi
+    rmdir "$policy_rc_d_backup_dir"
 }
 
 trap restore_policy_rc_d EXIT
@@ -82,7 +83,12 @@ exit 101
 EOF
 chmod 0755 "$policy_rc_d"
 
-apt-get install -y --no-install-recommends \
+if ! DEBIAN_FRONTEND=noninteractive timeout --signal=TERM 900s apt-get \
+    -o APT::Color=0 \
+    -o Acquire::http::Timeout=20 \
+    -o Acquire::https::Timeout=20 \
+    -o Acquire::Retries=0 \
+    install -y --no-install-recommends \
     ca-certificates \
     curl \
     wget \
@@ -91,7 +97,10 @@ apt-get install -y --no-install-recommends \
     htop \
     sudo \
     openssh-server \
-    tzdata
+    tzdata; then
+    echo "ERROR: APT package installation failed or exceeded its 15-minute limit." >&2
+    exit 1
+fi
 
 restore_policy_rc_d
 trap - EXIT

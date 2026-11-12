@@ -29,6 +29,9 @@ ARG SQUASHFS_COMPRESSION=xz
 # Original GRUB configuration location inside the ISO.
 ARG GRUB_CFG_PATH=/boot/grub/grub.cfg
 
+# Enable shell tracing in customization scripts when diagnosing a build.
+ARG DEBUG_CUSTOMIZATION=false
+
 # ------------------------------------------------------------
 # INSTALL BUILD DEPENDENCIES
 # ------------------------------------------------------------
@@ -85,6 +88,55 @@ COPY scripts/ /work/scripts/
 # ============================================================
 
 RUN set -euo pipefail; \
+    validate_iso_path() { \
+        local label="$1" path="$2" component; \
+        if [[ ! "$path" =~ ^/[A-Za-z0-9._+/-]+$ ]]; then \
+            echo "$label must be an absolute ISO path using only letters, numbers, '.', '_', '+', '-', and '/': $path" >&2; \
+            exit 1; \
+        fi; \
+        path_components_text="${path#/}"; \
+        IFS='/' read -r -a path_components <<< "$path_components_text"; \
+        for component in "${path_components[@]}"; do \
+            if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then \
+                echo "$label contains an invalid path component: $path" >&2; \
+                exit 1; \
+            fi; \
+        done; \
+    }; \
+    validate_iso_path CASPER_SQUASHFS_PATH "$CASPER_SQUASHFS_PATH"; \
+    validate_iso_path GRUB_CFG_PATH "$GRUB_CFG_PATH"; \
+    managed_iso_paths=( \
+        "$CASPER_SQUASHFS_PATH" \
+        "$GRUB_CFG_PATH" \
+        /casper/filesystem.size \
+        /casper/filesystem.manifest \
+        /md5sum.txt \
+    ); \
+    path_collides_with_managed() { \
+        local candidate="$1" managed; \
+        for managed in "${managed_iso_paths[@]}"; do \
+            if [[ "$candidate" == "$managed" || \
+                  "$candidate" == "$managed/"* || \
+                  "$managed" == "$candidate/"* ]]; then \
+                return 0; \
+            fi; \
+        done; \
+        return 1; \
+    }; \
+    for configured_path in "$CASPER_SQUASHFS_PATH" "$GRUB_CFG_PATH"; do \
+        for managed_path in /casper/filesystem.size /casper/filesystem.manifest /md5sum.txt; do \
+            if [[ "$configured_path" == "$managed_path" || \
+                  "$configured_path" == "$managed_path/"* || \
+                  "$managed_path" == "$configured_path/"* ]]; then \
+                echo "Configured ISO path overlaps build-managed path $managed_path: $configured_path" >&2; \
+                exit 1; \
+            fi; \
+        done; \
+    done; \
+    if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH" ]]; then \
+        echo "Configured SquashFS and GRUB paths must be different." >&2; \
+        exit 1; \
+    fi; \
     # --------------------------------------------------------
     # COPY CUSTOMIZATION SCRIPTS INTO ROOTFS
     # --------------------------------------------------------
@@ -123,7 +175,7 @@ RUN set -euo pipefail; \
         rm -f /work/rootfs/etc/resolv.conf; \
         cp /etc/resolv.conf /work/rootfs/etc/resolv.conf; \
         chroot /work/rootfs \
-            /usr/bin/env DEBIAN_FRONTEND=noninteractive \
+            /usr/bin/env DEBIAN_FRONTEND=noninteractive DEBUG_CUSTOMIZATION="$DEBUG_CUSTOMIZATION" \
             /bin/bash /opt/iso-customize/customize.sh; \
         restore_rootfs_resolver; \
         trap - EXIT; \
@@ -140,6 +192,12 @@ RUN set -euo pipefail; \
     case "$SQUASHFS_COMPRESSION" in gzip|lzo|lz4|xz|zstd) ;; *) \
         echo "Unsupported SquashFS compression: $SQUASHFS_COMPRESSION" >&2; exit 1;; \
     esac; \
+    compressor_help="$(mksquashfs -help 2>&1 || true)"; \
+    if ! grep -Eq "(^|[[:space:],])${SQUASHFS_COMPRESSION}([[:space:],(]|$)" \
+        <<< "$compressor_help"; then \
+        echo "SquashFS compressor is not available in this mksquashfs build: $SQUASHFS_COMPRESSION" >&2; \
+        exit 1; \
+    fi; \
     filesystem_size="$(du -sx --block-size=1 /work/rootfs | cut -f1)"; \
     printf '%s' "$filesystem_size" > /work/filesystem.size; \
     /bin/bash /work/scripts/generate-filesystem-manifest.sh /work/rootfs \
@@ -153,6 +211,24 @@ RUN set -euo pipefail; \
 COPY grub-overlay/ /work/grub-overlay/
 
 RUN set -euo pipefail; \
+    managed_iso_paths=( \
+        "$CASPER_SQUASHFS_PATH" \
+        "$GRUB_CFG_PATH" \
+        /casper/filesystem.size \
+        /casper/filesystem.manifest \
+        /md5sum.txt \
+    ); \
+    path_collides_with_managed() { \
+        local candidate="$1" managed; \
+        for managed in "${managed_iso_paths[@]}"; do \
+            if [[ "$candidate" == "$managed" || \
+                  "$candidate" == "$managed/"* || \
+                  "$managed" == "$candidate/"* ]]; then \
+                return 0; \
+            fi; \
+        done; \
+        return 1; \
+    }; \
     # ========================================================
     # GRUB CUSTOMIZATION
     # ========================================================
@@ -231,6 +307,10 @@ RUN set -euo pipefail; \
         # Do not overwrite the patched main GRUB configuration.
         if [[ "$iso_path" == "$GRUB_CFG_PATH" ]]; then \
             echo "Overlay must not replace main grub.cfg." >&2; \
+            exit 1; \
+        fi; \
+        if path_collides_with_managed "$iso_path"; then \
+            echo "Overlay destination collides with a build-managed ISO path: $iso_path" >&2; \
             exit 1; \
         fi; \
         changed_iso_paths+=( ".${iso_path}" ); \
@@ -331,6 +411,8 @@ COPY --from=iso-builder /output/custom.iso /custom.iso
 FROM scratch AS ubuntu-image
 
 COPY --from=iso-builder /work/docker-rootfs/ /
+
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /root
 
