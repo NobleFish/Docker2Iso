@@ -38,14 +38,20 @@ echo "=================================="
 
 echo "Starting APT repository update..."
 
-apt-get \
+echo "Configured APT repositories:"
+grep -RhsE '^[[:space:]]*(URIs:|deb[[:space:]])' \
+    /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+
+if ! timeout --signal=TERM 300s apt-get \
     -o APT::Color=0 \
     -o Acquire::http::Timeout=20 \
     -o Acquire::https::Timeout=20 \
     -o Acquire::Retries=0 \
-    -o Debug::Acquire::http=true \
-    -o Debug::Acquire::https=true \
-    update
+    -o Acquire::Languages=none \
+    update; then
+    echo "ERROR: APT repository update failed or exceeded its 5-minute limit." >&2
+    exit 1
+fi
 
 echo "APT repository update finished."
 

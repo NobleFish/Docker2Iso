@@ -15,6 +15,7 @@ ClientAliveCountMax 2
 EOF
 
 # Validate SSH configuration.
+install -d -m 0755 /run/sshd
 sshd -t
 
 # Enable SSH for a system booted with systemd.

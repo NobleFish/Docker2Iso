@@ -1,4 +1,4 @@
-.PHONY: all iso ubuntu clean
+.PHONY: all iso ubuntu test-image clean
 
 # Build both artifacts
 all:
@@ -21,6 +21,10 @@ ubuntu:
 		--tag custom-ubuntu:latest \
 		--load \
 		.
+
+# Build and load the image, then verify the results of every customization stage.
+test-image: ubuntu
+	docker run --rm -i custom-ubuntu:latest /bin/bash -s < confirmation.sh
 
 # Remove generated artifacts
 clean:

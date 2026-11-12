@@ -39,7 +39,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         xorriso \
         squashfs-tools \
-        proot \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------
@@ -61,24 +60,18 @@ RUN set -euo pipefail; \
     echo "=================================="; \
     echo " VERIFYING ORIGINAL UBUNTU ISO"; \
     echo "=================================="; \
-    \
     # Verify original ISO integrity.
     echo "$UBUNTU_ISO_SHA256  /work/original.iso" \
         | sha256sum --check --status; \
-    \
     echo "ISO checksum verified."; \
-    \
     # --------------------------------------------------------
     # EXTRACT ORIGINAL SQUASHFS
     # --------------------------------------------------------
-    \
     echo "Extracting Ubuntu filesystem..."; \
-    \
     xorriso -osirrox on \
         -indev /work/original.iso \
         -extract "$CASPER_SQUASHFS_PATH" \
         /work/filesystem.squashfs; \
-    \
     unsquashfs -f \
         -d /work/rootfs \
         /work/filesystem.squashfs
@@ -92,20 +85,15 @@ COPY grub-overlay/ /work/grub-overlay/
 # ============================================================
 
 RUN set -euo pipefail; \
-
     # --------------------------------------------------------
     # COPY CUSTOMIZATION SCRIPTS INTO ROOTFS
     # --------------------------------------------------------
-    \
     mkdir -p /work/rootfs/opt/iso-customize; \
-    \
     cp -a /work/scripts/. \
         /work/rootfs/opt/iso-customize/; \
-    \
     # --------------------------------------------------------
     # EXECUTE CUSTOMIZATION SCRIPTS
     # --------------------------------------------------------
-    \
     if [[ "$RUN_CUSTOMIZATION" == "true" ]]; then \
         echo "Running Ubuntu customization..."; \
         echo "Builder DNS configuration:"; \
@@ -122,7 +110,7 @@ RUN set -euo pipefail; \
         fi; \
         rm -f /work/rootfs/etc/resolv.conf; \
         cp /etc/resolv.conf /work/rootfs/etc/resolv.conf; \
-        proot -R /work/rootfs \
+        chroot /work/rootfs \
             /usr/bin/env DEBIAN_FRONTEND=noninteractive \
             /bin/bash /opt/iso-customize/customize.sh; \
         rm /work/rootfs/etc/resolv.conf; \
@@ -135,35 +123,26 @@ RUN set -euo pipefail; \
         echo "RUN_CUSTOMIZATION must be true or false." >&2; \
         exit 1; \
     fi; \
-    \
     # Remove build scripts from the final Ubuntu filesystem.
     rm -rf /work/rootfs/opt/iso-customize; \
-    \
     # --------------------------------------------------------
     # REBUILD SQUASHFS
     # --------------------------------------------------------
-    \
     echo "Rebuilding Ubuntu SquashFS..."; \
-    \
     mksquashfs /work/rootfs \
         /work/filesystem-custom.squashfs \
         -noappend \
         -comp "$SQUASHFS_COMPRESSION"; \
-    \
     # ========================================================
     # GRUB CUSTOMIZATION
     # ========================================================
-    \
     echo "Preparing GRUB customization..."; \
-    \
     test -f /work/grub-overlay/boot/grub/custom.cfg; \
-    \
     # Extract the original GRUB configuration.
     xorriso -osirrox on \
         -indev /work/original.iso \
         -extract "$GRUB_CFG_PATH" \
         /work/grub.cfg; \
-    \
     # Add custom.cfg loading without replacing original entries.
     if ! grep -q 'custom\.cfg' /work/grub.cfg; then \
         printf '\n%s\n' \
@@ -173,60 +152,49 @@ RUN set -euo pipefail; \
             'fi' \
             >> /work/grub.cfg; \
     fi; \
-    \
     # --------------------------------------------------------
     # PREPARE XORRISO ARGUMENTS
     # --------------------------------------------------------
-    \
     xorriso_args=( \
         xorriso \
         -indev /work/original.iso \
         -outdev /work/custom.iso \
     ); \
-    \
     # Replay boot metadata before changing files in the ISO tree.
     xorriso_args+=( -boot_image any replay ); \
-    \
     # Replace original SquashFS with customized SquashFS.
     xorriso_args+=( \
         -map \
         /work/filesystem-custom.squashfs \
         "$CASPER_SQUASHFS_PATH" \
     ); \
-    \
     # Replace original GRUB configuration with patched version.
     xorriso_args+=( \
         -map \
         /work/grub.cfg \
         "$GRUB_CFG_PATH" \
     ); \
-    \
     # --------------------------------------------------------
     # APPLY GRUB OVERLAY FILES
     # --------------------------------------------------------
-    \
     mapfile -d '' overlay_files < <( \
         find /work/grub-overlay \
             -type f \
             ! -name '.keep' \
             -print0 \
     ); \
-    \
     for overlay_file in "${overlay_files[@]}"; do \
-        \
         # Convert local path to ISO path.
         iso_path="/${overlay_file#/work/grub-overlay/}"; \
         if [[ "$iso_path" == *'..'* || "$iso_path" == *'\\'* ]]; then \
             echo "Invalid overlay destination: $iso_path" >&2; \
             exit 1; \
         fi; \
-        \
         # Do not overwrite the patched main GRUB configuration.
         if [[ "$iso_path" == "$GRUB_CFG_PATH" ]]; then \
             echo "Overlay must not replace main grub.cfg." >&2; \
             exit 1; \
         fi; \
-        \
         # Add file to ISO.
         xorriso_args+=( \
             -map \
@@ -234,39 +202,28 @@ RUN set -euo pipefail; \
             "$iso_path" \
         ); \
     done; \
-    \
     # --------------------------------------------------------
     # PRESERVE ORIGINAL BOOT CONFIGURATION
     # --------------------------------------------------------
-    \
     xorriso_args+=( \
         -commit \
         -end \
     ); \
-    \
     # --------------------------------------------------------
     # BUILD CUSTOM ISO
     # --------------------------------------------------------
-    \
     echo "Building customized Ubuntu ISO..."; \
-    \
     "${xorriso_args[@]}"; \
-    \
     # Confirm the ISO is readable and contains the rebuilt filesystem and GRUB files.
     test -s /work/custom.iso; \
     xorriso -indev /work/custom.iso -find "$CASPER_SQUASHFS_PATH" -exec lsdl; \
     xorriso -indev /work/custom.iso -find "$GRUB_CFG_PATH" -exec lsdl; \
-    \
     # --------------------------------------------------------
     # EXPORT ISO TO OUTPUT DIRECTORY
     # --------------------------------------------------------
-    \
     mkdir -p /output; \
     cp /work/custom.iso /output/custom.iso; \
-    \
     echo "ISO build completed."
-
-
 # Prepare a container-friendly root filesystem after creating the ISO.
 RUN mkdir -p /work/docker-rootfs && \
     tar --numeric-owner \
