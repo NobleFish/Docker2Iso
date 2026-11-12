@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 02-package-removal.sh - Script to remove unwanted packages from the Ubuntu filesystem.
 
 set -Eeuo pipefail
 

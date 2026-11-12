@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 05-service-configuration.sh - Script to configure services in the Ubuntu filesystem.
 
 set -Eeuo pipefail
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# confirmation.sh - Script to confirm the customization of the Ubuntu ISO based docker image.
 
 set -uo pipefail
 

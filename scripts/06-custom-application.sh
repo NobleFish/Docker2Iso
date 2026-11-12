@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 06-custom-application.sh - Script to install a custom application in the Ubuntu filesystem.
 
 set -Eeuo pipefail
 

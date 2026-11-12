@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# customize.sh - Script to customize the Ubuntu ISO image.
 
 set -Eeuo pipefail
 

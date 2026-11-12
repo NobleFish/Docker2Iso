@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 04-user-configuration.sh - Script to configure users in the Ubuntu filesystem.
 
 set -Eeuo pipefail
 

@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 99-cleanup.sh - Script to clean up the Ubuntu filesystem after customization.
 
 set -Eeuo pipefail
 

@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 03-system-configuration.sh - Script to configure system settings in the Ubuntu filesystem.
 
 set -Eeuo pipefail
 

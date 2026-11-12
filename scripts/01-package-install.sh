@@ -1,5 +1,5 @@
-
 #!/usr/bin/env bash
+# 01-package-install.sh - Script to install packages in the Ubuntu filesystem.
 
 set -Eeuo pipefail
 
