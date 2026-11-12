@@ -62,6 +62,7 @@ policy_rc_d=/usr/sbin/policy-rc.d
 policy_rc_d_backup_dir="$(mktemp -d /tmp/policy-rc.d.XXXXXX)"
 policy_rc_d_backup="$policy_rc_d_backup_dir/policy-rc.d"
 policy_rc_d_existed=false
+policy_rc_d_restored=false
 
 if [[ -e "$policy_rc_d" || -L "$policy_rc_d" ]]; then
     cp -a "$policy_rc_d" "$policy_rc_d_backup"
@@ -69,10 +70,18 @@ if [[ -e "$policy_rc_d" || -L "$policy_rc_d" ]]; then
 fi
 
 restore_policy_rc_d() {
-    rm -f "$policy_rc_d"
+    [[ "$policy_rc_d_restored" == true ]] && return 0
+
     if [[ "$policy_rc_d_existed" == true ]]; then
-        mv "$policy_rc_d_backup" "$policy_rc_d"
+        if [[ -e "$policy_rc_d_backup" || -L "$policy_rc_d_backup" ]]; then
+            rm -f "$policy_rc_d"
+            mv "$policy_rc_d_backup" "$policy_rc_d"
+        fi
+    else
+        rm -f "$policy_rc_d"
     fi
+
+    policy_rc_d_restored=true
     rmdir "$policy_rc_d_backup_dir"
 }
 

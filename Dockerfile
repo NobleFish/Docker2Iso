@@ -60,6 +60,40 @@ COPY ubuntu-24.04.5-live-server-amd64.iso /work/original.iso
 # Verify and extract the source ISO in a cached layer that does not depend on
 # the customization scripts or GRUB overlay.
 RUN set -euo pipefail; \
+    validate_iso_path() { \
+        local label="$1" path="$2" component path_components_text; \
+        local -a path_components; \
+        if [[ ! "$path" =~ ^/[A-Za-z0-9._+/-]+$ ]]; then \
+            echo "$label must be an absolute ISO path using only letters, numbers, '.', '_', '+', '-', and '/': $path" >&2; \
+            exit 1; \
+        fi; \
+        path_components_text="${path#/}"; \
+        IFS='/' read -r -a path_components <<< "$path_components_text"; \
+        for component in "${path_components[@]}"; do \
+            if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then \
+                echo "$label contains an invalid path component: $path" >&2; \
+                exit 1; \
+            fi; \
+        done; \
+    }; \
+    validate_iso_path CASPER_SQUASHFS_PATH "$CASPER_SQUASHFS_PATH"; \
+    validate_iso_path GRUB_CFG_PATH "$GRUB_CFG_PATH"; \
+    for configured_path in "$CASPER_SQUASHFS_PATH" "$GRUB_CFG_PATH"; do \
+        for managed_path in /casper/filesystem.size /casper/filesystem.manifest /md5sum.txt; do \
+            if [[ "$configured_path" == "$managed_path" || \
+                  "$configured_path" == "$managed_path/"* || \
+                  "$managed_path" == "$configured_path/"* ]]; then \
+                echo "Configured ISO path overlaps build-managed path $managed_path: $configured_path" >&2; \
+                exit 1; \
+            fi; \
+        done; \
+    done; \
+    if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH" || \
+          "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH/"* || \
+          "$GRUB_CFG_PATH" == "$CASPER_SQUASHFS_PATH/"* ]]; then \
+        echo "Configured SquashFS and GRUB paths must not overlap." >&2; \
+        exit 1; \
+    fi; \
     echo "=================================="; \
     echo " VERIFYING ORIGINAL UBUNTU ISO"; \
     echo "=================================="; \
@@ -89,7 +123,8 @@ COPY scripts/ /work/scripts/
 
 RUN set -euo pipefail; \
     validate_iso_path() { \
-        local label="$1" path="$2" component; \
+        local label="$1" path="$2" component path_components_text; \
+        local -a path_components; \
         if [[ ! "$path" =~ ^/[A-Za-z0-9._+/-]+$ ]]; then \
             echo "$label must be an absolute ISO path using only letters, numbers, '.', '_', '+', '-', and '/': $path" >&2; \
             exit 1; \
@@ -135,6 +170,11 @@ RUN set -euo pipefail; \
     done; \
     if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH" ]]; then \
         echo "Configured SquashFS and GRUB paths must be different." >&2; \
+        exit 1; \
+    fi; \
+    if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH/"* || \
+          "$GRUB_CFG_PATH" == "$CASPER_SQUASHFS_PATH/"* ]]; then \
+        echo "Configured SquashFS and GRUB paths must not overlap as parent and child paths." >&2; \
         exit 1; \
     fi; \
     # --------------------------------------------------------
@@ -277,6 +317,10 @@ RUN set -euo pipefail; \
     # --------------------------------------------------------
     # APPLY GRUB OVERLAY FILES
     # --------------------------------------------------------
+    if find /work/grub-overlay -type l -print -quit | grep -q .; then \
+        echo "GRUB overlay must contain regular files only; symbolic links are not supported." >&2; \
+        exit 1; \
+    fi; \
     mapfile -d '' overlay_files < <( \
         find /work/grub-overlay \
             -type f \
