@@ -30,7 +30,4 @@ for package in "${PACKAGES[@]}"; do
 
 done
 
-# Remove dependencies that are no longer needed.
-apt-get autoremove --purge -y
-
 echo "Package removal completed."

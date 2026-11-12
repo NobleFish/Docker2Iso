@@ -3,11 +3,6 @@
 
 set -Eeuo pipefail
 
-if [[ "${DEBUG_CUSTOMIZATION:-false}" == true ]]; then
-    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
-    set -x
-fi
-
 echo "=================================="
 echo " NETWORK DIAGNOSTICS"
 echo "=================================="
@@ -25,10 +20,14 @@ fi
 
 echo
 echo "Checking HTTPS connectivity:"
-if curl -Iv --connect-timeout 10 https://archive.ubuntu.com/ubuntu/; then
-    echo "HTTPS connectivity successful."
+if command -v curl >/dev/null 2>&1; then
+    if curl -Iv --connect-timeout 10 https://archive.ubuntu.com/ubuntu/; then
+        echo "HTTPS connectivity successful."
+    else
+        echo "ERROR: HTTPS connectivity diagnostic failed."
+    fi
 else
-    echo "ERROR: HTTPS connectivity failed."
+    echo "Skipping HTTPS diagnostic because curl is not installed yet."
 fi
 
 echo

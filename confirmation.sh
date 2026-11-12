@@ -56,15 +56,26 @@ check_user_configuration() {
     id isoadmin >/dev/null \
         && id -nG isoadmin | tr ' ' '\n' | grep -Fxq sudo \
         && test "$(getent passwd isoadmin | cut -d: -f6)" = /home/isoadmin \
+        && test "$(passwd -S isoadmin | awk '{print $2}')" = L \
         && test -d /home/isoadmin/custom \
         && test "$(stat -c '%U:%G' /home/isoadmin/custom)" = isoadmin:isoadmin
 }
 
 check_ssh_configuration() {
+    local effective_config
     grep -Fxq 'ClientAliveInterval 300' /etc/ssh/sshd_config.d/99-custom.conf \
         && grep -Fxq 'ClientAliveCountMax 2' /etc/ssh/sshd_config.d/99-custom.conf \
+        && test -f /etc/systemd/system/ssh.service.d/10-generate-host-keys.conf \
+        && grep -Fxq 'ExecStartPre=/usr/bin/ssh-keygen -A' /etc/systemd/system/ssh.service.d/10-generate-host-keys.conf \
+        && ! compgen -G '/etc/ssh/ssh_host_*_key' >/dev/null \
         && install -d -m 0755 /run/sshd \
+        && ssh-keygen -A \
+        && test -s /etc/ssh/ssh_host_ed25519_key \
+        && test -s /etc/ssh/ssh_host_rsa_key \
         && sshd -t \
+        && effective_config="$(sshd -T)" \
+        && grep -Fxq 'clientaliveinterval 300' <<< "$effective_config" \
+        && grep -Fxq 'clientalivecountmax 2' <<< "$effective_config" \
         && test "$(systemctl --root=/ is-enabled ssh.service)" = enabled
 }
 
@@ -77,10 +88,19 @@ check_custom_application() {
 }
 
 check_cleanup() {
-    local leftover
+    local leftover temporary_policy_backup
     leftover="$(find /var/lib/apt/lists /var/cache/apt/archives \
         -type f ! -name lock -print -quit 2>/dev/null)"
-    [[ -z "$leftover" ]]
+    temporary_policy_backup="$(find /tmp -maxdepth 1 -name 'policy-rc.d.*' -print -quit 2>/dev/null)"
+    [[ -z "$leftover" && -z "$temporary_policy_backup" ]]
+}
+
+check_runtime_directories() {
+    local path
+    for path in /dev /proc /sys /run /tmp; do
+        test -d "$path" || return 1
+    done
+    test "$(stat -c '%a' /tmp)" = 1777
 }
 
 stage '01 package installation' check_installed_packages
@@ -89,6 +109,7 @@ stage '03 system configuration' check_system_configuration
 stage '04 user configuration' check_user_configuration
 stage '05 service configuration' check_ssh_configuration
 stage '06 custom application' check_custom_application
+stage '98 runtime directories' check_runtime_directories
 stage '99 filesystem cleanup' check_cleanup
 
 if (( failed )); then

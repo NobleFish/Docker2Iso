@@ -122,61 +122,6 @@ COPY scripts/ /work/scripts/
 # ============================================================
 
 RUN set -euo pipefail; \
-    validate_iso_path() { \
-        local label="$1" path="$2" component path_components_text; \
-        local -a path_components; \
-        if [[ ! "$path" =~ ^/[A-Za-z0-9._+/-]+$ ]]; then \
-            echo "$label must be an absolute ISO path using only letters, numbers, '.', '_', '+', '-', and '/': $path" >&2; \
-            exit 1; \
-        fi; \
-        path_components_text="${path#/}"; \
-        IFS='/' read -r -a path_components <<< "$path_components_text"; \
-        for component in "${path_components[@]}"; do \
-            if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then \
-                echo "$label contains an invalid path component: $path" >&2; \
-                exit 1; \
-            fi; \
-        done; \
-    }; \
-    validate_iso_path CASPER_SQUASHFS_PATH "$CASPER_SQUASHFS_PATH"; \
-    validate_iso_path GRUB_CFG_PATH "$GRUB_CFG_PATH"; \
-    managed_iso_paths=( \
-        "$CASPER_SQUASHFS_PATH" \
-        "$GRUB_CFG_PATH" \
-        /casper/filesystem.size \
-        /casper/filesystem.manifest \
-        /md5sum.txt \
-    ); \
-    path_collides_with_managed() { \
-        local candidate="$1" managed; \
-        for managed in "${managed_iso_paths[@]}"; do \
-            if [[ "$candidate" == "$managed" || \
-                  "$candidate" == "$managed/"* || \
-                  "$managed" == "$candidate/"* ]]; then \
-                return 0; \
-            fi; \
-        done; \
-        return 1; \
-    }; \
-    for configured_path in "$CASPER_SQUASHFS_PATH" "$GRUB_CFG_PATH"; do \
-        for managed_path in /casper/filesystem.size /casper/filesystem.manifest /md5sum.txt; do \
-            if [[ "$configured_path" == "$managed_path" || \
-                  "$configured_path" == "$managed_path/"* || \
-                  "$managed_path" == "$configured_path/"* ]]; then \
-                echo "Configured ISO path overlaps build-managed path $managed_path: $configured_path" >&2; \
-                exit 1; \
-            fi; \
-        done; \
-    done; \
-    if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH" ]]; then \
-        echo "Configured SquashFS and GRUB paths must be different." >&2; \
-        exit 1; \
-    fi; \
-    if [[ "$CASPER_SQUASHFS_PATH" == "$GRUB_CFG_PATH/"* || \
-          "$GRUB_CFG_PATH" == "$CASPER_SQUASHFS_PATH/"* ]]; then \
-        echo "Configured SquashFS and GRUB paths must not overlap as parent and child paths." >&2; \
-        exit 1; \
-    fi; \
     # --------------------------------------------------------
     # COPY CUSTOMIZATION SCRIPTS INTO ROOTFS
     # --------------------------------------------------------
@@ -282,7 +227,7 @@ RUN set -euo pipefail; \
         -extract /md5sum.txt \
         /work/md5sum.original; \
     # Add custom.cfg loading without replacing original entries.
-    if ! grep -q 'custom\.cfg' /work/grub.cfg; then \
+    if ! grep -Fq 'source "$prefix/custom.cfg"' /work/grub.cfg; then \
         printf '\n%s\n' \
             '# Load additional custom GRUB entries.' \
             'if [ -f "$prefix/custom.cfg" ]; then' \
@@ -424,7 +369,8 @@ RUN set -euo pipefail; \
     cp /work/custom.iso /output/custom.iso; \
     echo "ISO build completed."
 # Prepare a container-friendly root filesystem after creating the ISO.
-RUN mkdir -p /work/docker-rootfs && \
+RUN set -euo pipefail; \
+    mkdir -p /work/docker-rootfs; \
     tar --numeric-owner \
         --exclude='./proc' \
         --exclude='./sys' \
@@ -435,8 +381,9 @@ RUN mkdir -p /work/docker-rootfs && \
         --exclude='./etc/resolv.conf' \
         --exclude='./etc/hostname' \
         -cpf - -C /work/rootfs . \
-        | tar --numeric-owner -xpf - -C /work/docker-rootfs && \
-    mkdir -p /work/docker-rootfs/{dev,proc,sys,run,tmp} && \
+        | tar --numeric-owner -xpf - -C /work/docker-rootfs; \
+    mkdir -p /work/docker-rootfs/dev /work/docker-rootfs/proc \
+        /work/docker-rootfs/sys /work/docker-rootfs/run /work/docker-rootfs/tmp; \
     chmod 1777 /work/docker-rootfs/tmp
 
 # ============================================================

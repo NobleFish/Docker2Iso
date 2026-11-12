@@ -3,6 +3,12 @@
 
 set -Eeuo pipefail
 
+if [[ "${DEBUG_CUSTOMIZATION:-false}" == true ]]; then
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    set -x
+    export SHELLOPTS
+fi
+
 SCRIPT_DIR="/opt/iso-customize"
 
 echo "=================================="
@@ -12,6 +18,11 @@ echo "=================================="
 # Find scripts in numerical order.
 shopt -s nullglob
 scripts=("$SCRIPT_DIR"/[0-9][0-9]-*.sh)
+
+if (( ${#scripts[@]} == 0 )); then
+    echo "No customization scripts found in $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # Execute every discovered script.
 for script in "${scripts[@]}"; do
