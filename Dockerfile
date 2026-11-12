@@ -74,11 +74,11 @@ RUN set -euo pipefail; \
         /work/filesystem.squashfs; \
     unsquashfs -f \
         -d /work/rootfs \
-        /work/filesystem.squashfs
+        /work/filesystem.squashfs && \
+    rm /work/filesystem.squashfs
 
 # Copy customization inputs after extraction so edits reuse the cached rootfs.
 COPY scripts/ /work/scripts/
-COPY grub-overlay/ /work/grub-overlay/
 
 # ============================================================
 # MAIN BUILD PROCESS
@@ -100,25 +100,33 @@ RUN set -euo pipefail; \
         cat /etc/resolv.conf; \
         echo "Checking rootfs resolver:"; \
         ls -l /work/rootfs/etc/resolv.conf || true; \
+        resolver_kind=absent; \
         resolver_link=""; \
         resolver_file_backup=""; \
         if [[ -L /work/rootfs/etc/resolv.conf ]]; then \
+            resolver_kind=symlink; \
             resolver_link="$(readlink /work/rootfs/etc/resolv.conf)"; \
         elif [[ -e /work/rootfs/etc/resolv.conf ]]; then \
+            resolver_kind=file; \
             resolver_file_backup=/work/rootfs-resolv.conf.original; \
             cp -a /work/rootfs/etc/resolv.conf "$resolver_file_backup"; \
         fi; \
+        restore_rootfs_resolver() { \
+            rm -f /work/rootfs/etc/resolv.conf; \
+            if [[ "$resolver_kind" == symlink ]]; then \
+                ln -s "$resolver_link" /work/rootfs/etc/resolv.conf; \
+            elif [[ "$resolver_kind" == file ]]; then \
+                mv "$resolver_file_backup" /work/rootfs/etc/resolv.conf; \
+            fi; \
+        }; \
+        trap restore_rootfs_resolver EXIT; \
         rm -f /work/rootfs/etc/resolv.conf; \
         cp /etc/resolv.conf /work/rootfs/etc/resolv.conf; \
         chroot /work/rootfs \
             /usr/bin/env DEBIAN_FRONTEND=noninteractive \
             /bin/bash /opt/iso-customize/customize.sh; \
-        rm /work/rootfs/etc/resolv.conf; \
-        if [[ -n "$resolver_link" ]]; then \
-            ln -s "$resolver_link" /work/rootfs/etc/resolv.conf; \
-        elif [[ -n "$resolver_file_backup" ]]; then \
-            mv "$resolver_file_backup" /work/rootfs/etc/resolv.conf; \
-        fi; \
+        restore_rootfs_resolver; \
+        trap - EXIT; \
     elif [[ "$RUN_CUSTOMIZATION" != "false" ]]; then \
         echo "RUN_CUSTOMIZATION must be true or false." >&2; \
         exit 1; \
@@ -129,10 +137,22 @@ RUN set -euo pipefail; \
     # REBUILD SQUASHFS
     # --------------------------------------------------------
     echo "Rebuilding Ubuntu SquashFS..."; \
+    case "$SQUASHFS_COMPRESSION" in gzip|lzo|lz4|xz|zstd) ;; *) \
+        echo "Unsupported SquashFS compression: $SQUASHFS_COMPRESSION" >&2; exit 1;; \
+    esac; \
+    filesystem_size="$(du -sx --block-size=1 /work/rootfs | cut -f1)"; \
+    printf '%s' "$filesystem_size" > /work/filesystem.size; \
+    /bin/bash /work/scripts/generate-filesystem-manifest.sh /work/rootfs \
+        > /work/filesystem.manifest; \
     mksquashfs /work/rootfs \
         /work/filesystem-custom.squashfs \
         -noappend \
-        -comp "$SQUASHFS_COMPRESSION"; \
+        -comp "$SQUASHFS_COMPRESSION"
+
+# Keep the large root filesystem build cached independently of GRUB edits.
+COPY grub-overlay/ /work/grub-overlay/
+
+RUN set -euo pipefail; \
     # ========================================================
     # GRUB CUSTOMIZATION
     # ========================================================
@@ -142,7 +162,9 @@ RUN set -euo pipefail; \
     xorriso -osirrox on \
         -indev /work/original.iso \
         -extract "$GRUB_CFG_PATH" \
-        /work/grub.cfg; \
+        /work/grub.cfg \
+        -extract /md5sum.txt \
+        /work/md5sum.original; \
     # Add custom.cfg loading without replacing original entries.
     if ! grep -q 'custom\.cfg' /work/grub.cfg; then \
         printf '\n%s\n' \
@@ -168,6 +190,8 @@ RUN set -euo pipefail; \
         /work/filesystem-custom.squashfs \
         "$CASPER_SQUASHFS_PATH" \
     ); \
+    xorriso_args+=( -map /work/filesystem.size /casper/filesystem.size ); \
+    xorriso_args+=( -map /work/filesystem.manifest /casper/filesystem.manifest ); \
     # Replace original GRUB configuration with patched version.
     xorriso_args+=( \
         -map \
@@ -183,18 +207,33 @@ RUN set -euo pipefail; \
             ! -name '.keep' \
             -print0 \
     ); \
+    changed_iso_paths=( \
+        "./${CASPER_SQUASHFS_PATH#/}" \
+        "./casper/filesystem.size" \
+        "./casper/filesystem.manifest" \
+        "./${GRUB_CFG_PATH#/}" \
+    ); \
     for overlay_file in "${overlay_files[@]}"; do \
         # Convert local path to ISO path.
-        iso_path="/${overlay_file#/work/grub-overlay/}"; \
-        if [[ "$iso_path" == *'..'* || "$iso_path" == *'\\'* ]]; then \
+        overlay_rel_path="${overlay_file#/work/grub-overlay/}"; \
+        iso_path="/$overlay_rel_path"; \
+        if [[ ! "$overlay_rel_path" =~ ^[A-Za-z0-9._+/-]+$ ]]; then \
             echo "Invalid overlay destination: $iso_path" >&2; \
             exit 1; \
         fi; \
+        IFS='/' read -r -a overlay_components <<< "$overlay_rel_path"; \
+        for overlay_component in "${overlay_components[@]}"; do \
+            if [[ -z "$overlay_component" || "$overlay_component" == . || "$overlay_component" == .. ]]; then \
+                echo "Invalid overlay path component in: $iso_path" >&2; \
+                exit 1; \
+            fi; \
+        done; \
         # Do not overwrite the patched main GRUB configuration.
         if [[ "$iso_path" == "$GRUB_CFG_PATH" ]]; then \
             echo "Overlay must not replace main grub.cfg." >&2; \
             exit 1; \
         fi; \
+        changed_iso_paths+=( ".${iso_path}" ); \
         # Add file to ISO.
         xorriso_args+=( \
             -map \
@@ -202,6 +241,25 @@ RUN set -euo pipefail; \
             "$iso_path" \
         ); \
     done; \
+    printf '%s\n' "${changed_iso_paths[@]}" > /work/changed-iso-paths.txt; \
+    awk 'NR == FNR { skip[$0] = 1; next } !($2 in skip)' \
+        /work/changed-iso-paths.txt /work/md5sum.original \
+        > /work/md5sum.updated; \
+    append_md5() { \
+        local source_file="$1" iso_path="$2" hash; \
+        hash="$(md5sum -- "$source_file")"; \
+        printf '%s  %s\n' "${hash%% *}" "$iso_path" >> /work/md5sum.updated; \
+    }; \
+    append_md5 /work/filesystem-custom.squashfs "./${CASPER_SQUASHFS_PATH#/}"; \
+    append_md5 /work/filesystem.size ./casper/filesystem.size; \
+    append_md5 /work/filesystem.manifest ./casper/filesystem.manifest; \
+    append_md5 /work/grub.cfg "./${GRUB_CFG_PATH#/}"; \
+    for overlay_file in "${overlay_files[@]}"; do \
+        overlay_rel_path="${overlay_file#/work/grub-overlay/}"; \
+        append_md5 "$overlay_file" "./$overlay_rel_path"; \
+    done; \
+    LC_ALL=C sort -k2,2 /work/md5sum.updated -o /work/md5sum.updated; \
+    xorriso_args+=( -map /work/md5sum.updated /md5sum.txt ); \
     # --------------------------------------------------------
     # PRESERVE ORIGINAL BOOT CONFIGURATION
     # --------------------------------------------------------
@@ -214,10 +272,27 @@ RUN set -euo pipefail; \
     # --------------------------------------------------------
     echo "Building customized Ubuntu ISO..."; \
     "${xorriso_args[@]}"; \
-    # Confirm the ISO is readable and contains the rebuilt filesystem and GRUB files.
+    # Verify the ISO contains the exact rebuilt files.
     test -s /work/custom.iso; \
-    xorriso -indev /work/custom.iso -find "$CASPER_SQUASHFS_PATH" -exec lsdl; \
-    xorriso -indev /work/custom.iso -find "$GRUB_CFG_PATH" -exec lsdl; \
+    mkdir -p /work/iso-verify/casper /work/iso-verify/boot/grub; \
+    xorriso -osirrox on -indev /work/custom.iso \
+        -extract "$CASPER_SQUASHFS_PATH" /work/iso-verify/filesystem.squashfs \
+        -extract /casper/filesystem.size /work/iso-verify/casper/filesystem.size \
+        -extract /casper/filesystem.manifest /work/iso-verify/casper/filesystem.manifest \
+        -extract "$GRUB_CFG_PATH" /work/iso-verify/grub.cfg \
+        -extract /md5sum.txt /work/iso-verify/md5sum.txt; \
+    cmp /work/filesystem-custom.squashfs /work/iso-verify/filesystem.squashfs; \
+    cmp /work/filesystem.size /work/iso-verify/casper/filesystem.size; \
+    cmp /work/filesystem.manifest /work/iso-verify/casper/filesystem.manifest; \
+    cmp /work/grub.cfg /work/iso-verify/grub.cfg; \
+    cmp /work/md5sum.updated /work/iso-verify/md5sum.txt; \
+    for overlay_file in "${overlay_files[@]}"; do \
+        overlay_rel_path="${overlay_file#/work/grub-overlay/}"; \
+        mkdir -p "/work/iso-verify/overlays/$(dirname "$overlay_rel_path")"; \
+        xorriso -osirrox on -indev /work/custom.iso \
+            -extract "/$overlay_rel_path" "/work/iso-verify/overlays/$overlay_rel_path"; \
+        cmp "$overlay_file" "/work/iso-verify/overlays/$overlay_rel_path"; \
+    done; \
     # --------------------------------------------------------
     # EXPORT ISO TO OUTPUT DIRECTORY
     # --------------------------------------------------------
@@ -235,9 +310,8 @@ RUN mkdir -p /work/docker-rootfs && \
         --exclude='./etc/hosts' \
         --exclude='./etc/resolv.conf' \
         --exclude='./etc/hostname' \
-        --exclude='./etc/mtab' \
         -cpf - -C /work/rootfs . \
-        | tar -xpf - -C /work/docker-rootfs && \
+        | tar --numeric-owner -xpf - -C /work/docker-rootfs && \
     mkdir -p /work/docker-rootfs/{dev,proc,sys,run,tmp} && \
     chmod 1777 /work/docker-rootfs/tmp
 

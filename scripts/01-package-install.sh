@@ -57,6 +57,31 @@ echo "APT repository update finished."
 
 echo "Installing packages..."
 
+policy_rc_d=/usr/sbin/policy-rc.d
+policy_rc_d_backup="$(mktemp /tmp/policy-rc.d.XXXXXX)"
+policy_rc_d_existed=false
+
+if [[ -e "$policy_rc_d" || -L "$policy_rc_d" ]]; then
+    cp -a "$policy_rc_d" "$policy_rc_d_backup"
+    policy_rc_d_existed=true
+fi
+
+restore_policy_rc_d() {
+    rm -f "$policy_rc_d"
+    if [[ "$policy_rc_d_existed" == true ]]; then
+        mv "$policy_rc_d_backup" "$policy_rc_d"
+    else
+        rm -f "$policy_rc_d_backup"
+    fi
+}
+
+trap restore_policy_rc_d EXIT
+cat > "$policy_rc_d" <<'EOF'
+#!/bin/sh
+exit 101
+EOF
+chmod 0755 "$policy_rc_d"
+
 apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -67,5 +92,8 @@ apt-get install -y --no-install-recommends \
     sudo \
     openssh-server \
     tzdata
+
+restore_policy_rc_d
+trap - EXIT
 
 echo "Package installation completed."
